@@ -4,15 +4,12 @@ This repository contains various utility classes and functions to facilitate wor
 
 ## Table of Contents
 
-- [MongoDB Utilities](#mongodb-utilities)
-- [Message Queue Utilities](#message-queue-utilities)
-- [Excel Utilities](#excel-utilities)
-- [Text File Utilities](#text-file-utilities)
-- [MySQL Utilities](#mysql-utilities)
+- [MongoDB](#mongodb_tool)
 
-## MongoDB Utilities
 
-The MongoDB utilities provide convenient methods to interact with MongoDB databases. These include connecting to the database, performing CRUD operations, and handling collections.
+## MongoDB Util
+
+The MongoDB util provide convenient methods to interact with MongoDB databases. These include connecting to the database, performing CRUD operations, and handling collections.
 
 ### Features
 - Connect to MongoDB
