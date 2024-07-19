@@ -1,36 +1,20 @@
 # -*- coding: utf-8 -*-
+import hashlib
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pymongo.errors
+
 from loguru import logger
 from pymongo import MongoClient
-import hashlib
-import time
-from excel_tool import save_dict_list_to_excel
 
 
 class MongoDB:
-    _instance_lock = threading.Lock()  # 线程锁
-    _instance = None  # 单例实例
-
-    @logger.catch
-    def __new__(cls, *args, **kwargs):
-        """
-        利用线程锁，实现多线程下的单例模式
-        """
-        if not cls._instance:
-            with cls._instance_lock:
-                if not cls._instance:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
-
-    @logger.catch
     def __init__(self,
                  host='localhost',
                  port=27017,
                  db_name: str = '',
-                 collection_name: str = None,
                  username: str = None,
                  password: str = None):
         """
@@ -38,30 +22,30 @@ class MongoDB:
         :param host: MongoDB服务器地址
         :param port: MongoDB服务器端口
         :param db_name: 数据库名称
-        :param collection_name: 集合名称
         :param username: 用户名
         :param password: 密码
         """
-        if not hasattr(self, 'initialized'):  # 避免重复初始化
-            self.client = None
-            self.db = None
-            self.collection = None
-            self.db_name = db_name
-            self.collection_name = collection_name
-            self.rlock = threading.RLock()  # 添加实例级别的锁
-            self._connect_to_db(host, port, username, password)
-            self.initialized = True
+        self.client = None
+        self.db = None
+        self.db_name = db_name
+        self._connect_to_db(host, port, username, password)
+
+    def __getitem__(self, collection_name: str):
+        """
+        获取指定的集合
+        :param collection_name: 集合名称
+        :return: 集合对象
+        """
+        if self.db is None:
+            raise Exception("数据库未选择")
+        return CollectionWrapper(self.db_name, self.db[collection_name])
 
     def _connect_to_db(self, host, port, username, password):
         try:
             self.client = MongoClient(host=host, port=port, username=username, password=password)
             if self.db_name:
                 self.db = self.client[self.db_name]
-                if self.collection_name:
-                    self.collection = self.db[self.collection_name]
-                    logger.info(f"已连接 MongoDB: {self.db_name}:{self.collection_name}")
-                else:
-                    logger.info(f"已连接 MongoDB: {self.db_name}")
+                logger.info(f"已连接 MongoDB: {self.db_name}")
             else:
                 logger.info("已连接到 MongoDB 服务器，但未选择数据库。")
         except Exception as e:
@@ -74,27 +58,59 @@ class MongoDB:
         error_msg += f"\n- 主机: {host}\n- 端口: {port}\n\n详细错误：{str(e)}"
         raise ConnectionError(error_msg)
 
-    @logger.catch
-    def use(self, collection_name: str = '', db_name: str = ''):
+    def close(self):
         """
-        切换当前使用的 MongoDB 集合。
-        :param db_name: (str)新的库名称。
-        :param collection_name: (str)新的集合名称。
-        :return: None
+        关闭与 MongoDB 的连接。
         """
         try:
-            if db_name:
-                self.db_name = db_name
-                self.db = self.client[db_name]
-            if collection_name:
-                self.collection_name = collection_name
-                self.collection = self.db[collection_name]
-            logger.info(f"已连接 MongoDB: {self.db_name}:{self.collection_name}")
+            if self.client:
+                self.client.close()
+                logger.info("MongoDB 连接已关闭")
         except Exception as e:
-            logger.error(f"切换到数据库: {db_name} 或集合: {collection_name} 失败。错误信息: {str(e)}")
-            raise RuntimeError(f"无法切换到数据库: {db_name} 或集合: {collection_name}。错误信息: {str(e)}")
+            logger.error(f"关闭MongoDB连接时发生错误: {e}")
 
-        return self
+
+class CollectionWrapper:
+    def __init__(self, db_name, collection):
+        """
+        初始化 CollectionWrapper 对象
+        :param db_name: str 数据库名称
+        :param collection: 集合对象
+        """
+        self.collection_name = collection.name
+        self.db_name = db_name
+        self.collection = collection
+        self.rlock = threading.RLock()  # 为每个集合添加锁
+
+    def __getitem__(self, key):
+        """
+        获取集合中的某个属性
+        :param key: str 集合名称
+        :return: 属性值
+        """
+        return getattr(self.collection, key)
+
+    @staticmethod
+    def remove_duplicates(dict_list, distinct_key):
+        """
+        根据字典中的 `uid` 键值进行去重。
+
+        参数:
+            dict_list (list[dict]): 包含字典的列表。
+            distinct_key(str,optional): 根据某个key的value进行去重
+        返回:
+            list: 去重后的字典列表。
+        """
+        seen_ids = set()
+        unique_list = []
+
+        for item in dict_list:
+            id = item.get(distinct_key)
+            if id not in seen_ids:
+                seen_ids.add(id)
+                unique_list.append(item)
+
+        return unique_list
 
     @logger.catch
     def find_documents(self,
@@ -128,6 +144,10 @@ class MongoDB:
                     distinct_values = self.collection.distinct(distinct_key, filter=query)
                     cursor = self.collection.find(query, projection=projection, limit=limit, skip=skip)
                     data = [doc for doc in cursor if doc[distinct_key] in distinct_values]
+                    # # 直接使用 distinct 方法
+                    # distinct_values = self.collection.distinct(distinct_key, query)
+                    # data = [{distinct_key: value} for value in distinct_values]
+                    data = self.remove_duplicates(data, distinct_key)
             else:
                 with self.rlock:
                     cursor = self.collection.find(query, projection=projection, limit=limit, skip=skip)
@@ -205,7 +225,7 @@ class MongoDB:
                              explain: bool = False
                              ):
         """
-        将查询到的数据保存到Excel文件中。
+        将查询到的数据保存到Excel文件中。(废弃)
         """
         if output_file is None:
             if self.db_name == '':
@@ -234,22 +254,72 @@ class MongoDB:
         if not infos:
             logger.error("请先执行find_documents方法查询数据")
             return
-        save_dict_list_to_excel(infos,
-                                output_file=output_file,
-                                sheet_name=sheet_name,
-                                check_columns=check_columns)
+        # save_dict_list_to_excel(infos,
+        #                         output_file=output_file,
+        #                         sheet_name=sheet_name,
+        #                         check_columns=check_columns)
 
     @logger.catch
-    def save_dict_to_collection(self, dict, query_key: str = None):
+    def update_documents(self, data_dict, query_key: str):
+        """
+        根据传入的字典的某个key的值进行查询，判断是否已经存在相同记录，
+        如果存在则更新记录，保留已有的字段数据，仅更新传入的字段。
+        如果不存在则不进行任何操作。
+
+        Args:
+            data_dict (dict): 待更新的数据字典。
+            query_key (str): 用于查询和判断重复的键名。
+        """
+        if not isinstance(data_dict, dict):
+            raise TypeError("data_dict 必须是一个字典")
+        if not query_key:
+            raise ValueError("query_key 不能为空")
+
+        collection_info = f"{self.db_name}:{self.collection_name}"
+        start_time = time.perf_counter()
+
+        try:
+            query_value = data_dict.get(query_key)
+            if query_value is None:
+                raise ValueError(f"{collection_info} 指定的查询键'{query_key}'在传入的记录数据中不存在或其值为None")
+
+            with self.rlock:
+                existing_document = self.collection.find_one({query_key: query_value})
+
+            if existing_document is not None:
+                # 合并现有记录和新数据
+                update_data = {**existing_document, **data_dict}
+                # 去掉 _id 字段以避免 MongoDB 错误
+                update_data.pop('_id', None)
+                update_filter = {query_key: query_value}
+                with self.rlock:
+                    result = self.collection.update_one(update_filter, {'$set': update_data})
+                operation_result = f"数据成功更新到mongodb {collection_info}, 耗时: {time.perf_counter() - start_time:.6f} 秒"
+                logger.info(f"{operation_result}, {update_data}")
+                return result.modified_count  # 返回修改的记录数
+            else:
+                logger.info(f"{collection_info} 没有找到匹配的记录，不进行更新操作")
+                return 0  # 返回0表示没有更新任何记录
+        except pymongo.errors.PyMongoError as e:
+            logger.error(f"更新数据失败: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"更新数据时发生未知错误: {e}")
+            raise
+
+    @logger.catch
+    def save_dict_to_collection(self, data_dict, query_key: str = None):
         """
         根据传入的字典的某个key的值进行查询，判断是否已经存在相同记录，
         如果存在则更新，否则插入新记录。
 
         Args:
-            dict (dict): 待保存或更新的数据字典。
+            data_dict (dict): 待保存或更新的数据字典。
             query_key (str, optional): 用于查询和判断重复的键名，默认为None。
                                       如果为None，则直接插入新记录，不进行查询和更新操作。
         """
+        if not isinstance(data_dict, dict):
+            raise TypeError("data_dict 必须是一个字典")
         collection_info = f"{self.db_name}:{self.collection_name}"
         result = None
         _id = 0
@@ -257,12 +327,12 @@ class MongoDB:
         try:
             if query_key is None:
                 with self.rlock:
-                    result = self.collection.insert_one(dict)
+                    result = self.collection.insert_one(data_dict)
                 operation_result = f"1条数据成功保存到mongodb {collection_info}, 耗时: {time.perf_counter() - start_time:.6f} 秒"
-                logger.info(f"{operation_result}, {dict}")
+                logger.info(f"{operation_result}, {data_dict}")
                 _id = result.inserted_id
             elif isinstance(query_key, str) and query_key:
-                query_value = dict[query_key]
+                query_value = data_dict[query_key]
                 if query_value is None:
                     raise ValueError(f"{collection_info} 指定的查询键'{query_key}'在传入的记录数据中不存在")
                 with self.rlock:
@@ -273,16 +343,16 @@ class MongoDB:
                         query_key: query_value,
                     }
                     with self.rlock:
-                        result = self.collection.update_one(update_filter, {'$set': dict}, upsert=True)
+                        result = self.collection.update_one(update_filter, {'$set': data_dict}, upsert=True)
                     _id = result.upserted_id
                     operation_result = f"数据成功更新到mongodb {collection_info}, 耗时: {time.perf_counter() - start_time:.6f} 秒"
-                    logger.info(f"{operation_result}, {dict}")
+                    logger.info(f"{operation_result}, {data_dict}")
                 else:
                     # 插入新记录
                     with self.rlock:
-                        result = self.collection.insert_one(dict)
+                        result = self.collection.insert_one(data_dict)
                     operation_result = f"1条数据成功保存到mongodb {collection_info}, 耗时: {time.perf_counter() - start_time:.6f} 秒"
-                    logger.info(f"{operation_result}, {dict}")
+                    logger.info(f"{operation_result}, {data_dict}")
                     _id = result.inserted_id
             if result:
                 return _id
@@ -296,7 +366,9 @@ class MongoDB:
         """
         将字典列表批量保存至 MongoDB。
         """
-
+        if not isinstance(dict_list, list):
+            logger.error("传入的参数必须是列表")
+            return
         start_time = time.perf_counter()
         collection_info = f"{self.db_name}:{self.collection_name}"
 
@@ -340,14 +412,17 @@ class MongoDB:
         md5.update(text.encode('utf-8'))
         return md5.hexdigest()
 
-    def delete_documents(self, query, recyclable=False):
+    def delete_documents(self, query=None, recyclable=False, drop_if_empty=False):
         """
         删除满足条件的文档并根据需要将其移至回收站。
         :param query: 查询条件，字典格式
         :param recyclable: 是否将文档移至回收站，默认为False
+        :param drop_if_empty: 是否在删除所有满足条件的文档后，如果集合为空则删除集合，默认为False
         :return: 删除的文档数量
         """
 
+        if query is None:
+            query = {}
         if self.collection is None:
             raise Exception("未选择集合")
         try:
@@ -363,53 +438,40 @@ class MongoDB:
             if recyclable:
                 # 连接到回收站集合
                 recycle_db = 'recycle_bin'
-                recycle_collection_name = f"{self.db_name}:{self.collection_name}"
-                recycle_bin_collection = self.client[recycle_db][recycle_collection_name]
+                recycle_collection_name = f"{recycle_db}:{str(self.db_name) + ' ' + str(self.collection_name)}"
+                recycle_bin_collection = MongoDB(db_name=recycle_db)[recycle_collection_name]
 
                 # 将要删除的文档移至回收站集合
-                recycle_bin_collection.insert_many(documents_to_delete)
+                recycle_bin_collection.save_dict_list_to_collection(documents_to_delete)
                 logger.info(
-                    f"已将 {len(documents_to_delete)} 个文档移至回收站 {recycle_db}.{recycle_collection_name}。")
+                    f"已将 {len(documents_to_delete)} 个文档移至回收站 {recycle_db}:{recycle_collection_name}。")
 
             # 从原始集合中删除文档
             with self.rlock:
                 result = self.collection.delete_many(query)
             logger.info(f"已删除 {result.deleted_count} 个文档。")
 
+            # 检查集合是否为空并删除集合（如果需要）
+            if drop_if_empty:
+                with self.rlock:
+                    remaining_documents = self.collection.count_documents({})
+                    if remaining_documents == 0:
+                        self.collection.drop()
+                        logger.info(f"集合 {self.collection_name} 已删除，因为它是空的。")
+
             return result.deleted_count
         except Exception as e:
             logger.error(f"删除文档时出错：{str(e)}")
             raise
 
-    def close(self):
-        """
-        关闭与 MongoDB 的连接。
-        """
-        with self._instance_lock:
-            try:
-                if self.client:
-                    self.client.close()
-                    logger.info("MongoDB 连接已关闭")
-            except Exception as e:
-                logger.error(f"关闭MongoDB连接时发生错误: {e}")
 
+# 示例用法
+if __name__ == "__main__":
+    # 初始化MongoDB连接
+    db = MongoDB(db_name="test_db")
 
-# 使用示例
-if __name__ == '__main__':
-    db = MongoDB(host='localhost',
-                 port=27017,
-                 username=None,
-                 password=None,
-                 db_name='test',
-                 collection_name='test')
-    # 示例用法：
-    # # 保存数据
-    # info = {
-    #     'name': '张三',
-    #     'age': 20,
-    #     'email': 'zhangsan@example.com'
-    # }
-    # db.save_dict_to_collection(info)
+    # 选择集合
+    chapter_list = db['test_list']
 
     # 根据query_key更新
     info = {
@@ -417,15 +479,9 @@ if __name__ == '__main__':
         'age': 20,
         'email': 'zhangsan@qq.com'
     }
-    db.save_dict_to_collection(info, query_key='name')
     with ThreadPoolExecutor(max_workers=10) as executor:
         for i in range(10):
-            executor.submit(MongoDB(host='localhost',
-                                    port=27017,
-                                    username=None,
-                                    password=None,
-                                    db_name='test',
-                                    collection_name='test').save_dict_to_collection, info, query_key='name')
+            executor.submit(chapter_list.save_dict_to_collection, info, query_key='name')
     # 保存数据字典
     info = [
         {
@@ -439,14 +495,11 @@ if __name__ == '__main__':
             'email': 'lisi@example.com'
         }
     ]
-    db.save_dict_list_to_collection(info)
+    chapter_list.save_dict_list_to_collection(info)
     # 查询集合所有数据
-    db.find_documents()
-
-    # 条件查询 查询 age 大于 18 的用户，并仅返回 name 和 email 字段，限制返回结果数量为 10
-    db.find_documents(query={'age': {'$gt': 18}}, projection={'name': 1, 'email': 1}, limit=10)
-
-    # 切换集合
-    db.use(collection_name='test')
-    # 删除文档
-    db.delete_documents(query={'name': '张三'}, recyclable=True)
+    chapter_list.find_documents()
+    chapter_list.delete_documents()
+    # 查询数据示例
+    query = {"name": "John"}
+    documents = chapter_list.find_documents(query=query)
+    print(documents)
