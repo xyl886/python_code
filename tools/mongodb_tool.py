@@ -11,12 +11,14 @@ from pymongo import MongoClient
 
 
 class MongoDB:
-    def __init__(self,
-                 host='localhost',
-                 port=27017,
-                 db_name: str = '',
-                 username: str = None,
-                 password: str = None):
+    def __init__(
+            self,
+            host='localhost',
+            port=27017,
+            db_name: str = '',
+            username: str = None,
+            password: str = None,
+            log_enabled: bool = True):
         """
         初始化 MongoDB 连接
         :param host: MongoDB服务器地址
@@ -24,7 +26,9 @@ class MongoDB:
         :param db_name: 数据库名称
         :param username: 用户名
         :param password: 密码
+        :param log_enabled: 是否开启日志
         """
+        self.log_enabled = log_enabled
         self.client = None
         self.db = None
         self.db_name = db_name
@@ -38,16 +42,26 @@ class MongoDB:
         """
         if self.db is None:
             raise Exception("数据库未选择")
-        return CollectionWrapper(self.db_name, self.db[collection_name])
+        if not isinstance(collection_name, str) or not collection_name.isidentifier():
+            raise TypeError("collection_name 必须为字符串")
+        collection = self.db[collection_name]
+
+        # 尝试获取集合统计信息以验证连接有效性
+        try:
+            collection_stats = collection.estimated_document_count()
+            if self.log_enabled:
+                logger.info(f"成功连接到集合 {self.db_name}.{collection_name}，当前文档数: {collection_stats}")
+        except Exception as e:
+            logger.error(f"无法连接到集合 {self.db_name}.{collection_name}: {e}")
+            raise
+        logger.info(f"已连接 MongoDB: {self.db_name}")
+        return CollectionWrapper(self.db_name, self.db[collection_name], log_enabled=self.log_enabled)
 
     def _connect_to_db(self, host, port, username, password):
         try:
             self.client = MongoClient(host=host, port=port, username=username, password=password)
             if self.db_name:
                 self.db = self.client[self.db_name]
-                logger.info(f"已连接 MongoDB: {self.db_name}")
-            else:
-                logger.info("已连接到 MongoDB 服务器，但未选择数据库。")
         except Exception as e:
             self._handle_connection_error(e, host, port, username, password)
 
@@ -65,22 +79,25 @@ class MongoDB:
         try:
             if self.client:
                 self.client.close()
-                logger.info("MongoDB 连接已关闭")
         except Exception as e:
             logger.error(f"关闭MongoDB连接时发生错误: {e}")
+            raise
+        logger.info("MongoDB 连接已关闭")
 
 
 class CollectionWrapper:
-    def __init__(self, db_name, collection):
+    def __init__(self, db_name, collection, log_enabled=True):
         """
         初始化 CollectionWrapper 对象
         :param db_name: str 数据库名称
         :param collection: 集合对象
         """
-        self.collection_name = collection.name
         self.db_name = db_name
+        self.collection_name = collection.name
         self.collection = collection
         self.rlock = threading.RLock()  # 为每个集合添加锁
+        # 添加日志开关
+        self.log_enabled = log_enabled
 
     def __getitem__(self, key):
         """
@@ -89,6 +106,24 @@ class CollectionWrapper:
         :return: 属性值
         """
         return getattr(self.collection, key)
+
+    def index_information(self, index_name=None):
+        if index_name:
+            return self.collection.index_information(index_name)
+        else:
+            return self.collection.index_information()
+
+    def create_index(self, index, unique=True):
+        """
+        创建索引
+        """
+        self.collection.create_index(index, unique=unique)
+
+    def aggregate(self, pipeline):
+        """
+        聚合查询
+        """
+        return self.collection.aggregate(pipeline)
 
     @staticmethod
     def remove_duplicates(dict_list, distinct_key):
@@ -119,7 +154,8 @@ class CollectionWrapper:
                        limit: int = 0,
                        skip: int = 0,
                        distinct_key: str = None,
-                       explain: bool = False):
+                       explain: bool = False,
+                       sort: list = None):
         """
         根据给定的查询条件（query）从指定集合中查找文档。
 
@@ -142,7 +178,7 @@ class CollectionWrapper:
                 with self.rlock:
                     self.collection.create_index(distinct_key)
                     distinct_values = self.collection.distinct(distinct_key, filter=query)
-                    cursor = self.collection.find(query, projection=projection, limit=limit, skip=skip)
+                    cursor = self.collection.find(query, projection=projection, limit=limit, skip=skip,sort=sort)
                     data = [doc for doc in cursor if doc[distinct_key] in distinct_values]
                     # # 直接使用 distinct 方法
                     # distinct_values = self.collection.distinct(distinct_key, query)
@@ -153,8 +189,9 @@ class CollectionWrapper:
                     cursor = self.collection.find(query, projection=projection, limit=limit, skip=skip)
                     data = [doc for doc in cursor]
             cursor.batch_size = 10000  # 或根据实际情况调整 batch_size
-            logger.info(
-                f"{self.db_name}:{self.collection_name} 查询到 {len(data)} 条数据, 耗时: {time.perf_counter() - start_time:.6f} 秒")
+            if self.log_enabled:
+                logger.info(f"{self.db_name}:{self.collection_name} 查询到 {len(data)} 条数据, "
+                            f"耗时: {time.perf_counter() - start_time:.6f} 秒")
             if explain:
                 return cursor.explain()
             else:
@@ -320,6 +357,8 @@ class CollectionWrapper:
         """
         if not isinstance(data_dict, dict):
             raise TypeError("data_dict 必须是一个字典")
+        if query_key is not None and not isinstance(query_key, str):
+            raise TypeError("query_key 必须是一个字符串")
         collection_info = f"{self.db_name}:{self.collection_name}"
         result = None
         _id = 0
@@ -329,7 +368,8 @@ class CollectionWrapper:
                 with self.rlock:
                     result = self.collection.insert_one(data_dict)
                 operation_result = f"1条数据成功保存到mongodb {collection_info}, 耗时: {time.perf_counter() - start_time:.6f} 秒"
-                logger.info(f"{operation_result}, {data_dict}")
+                if self.log_enabled:
+                    logger.info(f"{operation_result}, {data_dict}")
                 _id = result.inserted_id
             elif isinstance(query_key, str) and query_key:
                 query_value = data_dict[query_key]
@@ -346,13 +386,15 @@ class CollectionWrapper:
                         result = self.collection.update_one(update_filter, {'$set': data_dict}, upsert=True)
                     _id = result.upserted_id
                     operation_result = f"数据成功更新到mongodb {collection_info}, 耗时: {time.perf_counter() - start_time:.6f} 秒"
-                    logger.info(f"{operation_result}, {data_dict}")
+                    if self.log_enabled:
+                        logger.info(f"{operation_result}, {data_dict}")
                 else:
                     # 插入新记录
                     with self.rlock:
                         result = self.collection.insert_one(data_dict)
                     operation_result = f"1条数据成功保存到mongodb {collection_info}, 耗时: {time.perf_counter() - start_time:.6f} 秒"
-                    logger.info(f"{operation_result}, {data_dict}")
+                    if self.log_enabled:
+                        logger.info(f"{operation_result}, {data_dict}")
                     _id = result.inserted_id
             if result:
                 return _id
@@ -367,8 +409,9 @@ class CollectionWrapper:
         将字典列表批量保存至 MongoDB。
         """
         if not isinstance(dict_list, list):
-            logger.error("传入的参数必须是列表")
-            return
+            raise TypeError("dict_list 必须是一个列表")
+        if len(dict_list) == 0:
+            raise ValueError("传入的参数列表不能为空")
         start_time = time.perf_counter()
         collection_info = f"{self.db_name}:{self.collection_name}"
 
@@ -377,24 +420,35 @@ class CollectionWrapper:
                 # 直接批量插入，不进行查询和更新
                 with self.rlock:
                     result = self.collection.insert_many(dict_list)  # 批量插入
-                logger.info(
-                    f"{len(result.inserted_ids)} 条数据成功保存到mongodb {collection_info}, 耗时: {time.perf_counter() - start_time:.6f} 秒")
+                if self.log_enabled:
+                    logger.info(f"{len(result.inserted_ids)} 条数据成功保存到mongodb {collection_info}, "
+                                f"耗时: {time.perf_counter() - start_time:.6f} 秒")
                 return result.inserted_ids  # 返回插入的ID列表
             else:
+                if not isinstance(query_key, str):
+                    raise ValueError("query_key 必须是一个字符串")
                 # 根据query_key查询出所有的数据的query_key存入list，
                 with self.rlock:
-                    existing_query_keys = set(
-                        doc[query_key] for doc in self.collection.find({query_key: {"$exists": True}}, {query_key: 1}))
+                    if query_key == '_id':
+                        existing_query_keys = set(
+                            str(doc[query_key]) for doc in self.collection.find({}, {query_key: 1}))
+                    else:
+                        existing_query_keys = set(
+                            doc[query_key] for doc in
+                            self.collection.find({query_key: {"$exists": True}}, {query_key: 1}))
                 # 分割新数据和已存在数据
                 new_data = [data for data in dict_list if data[query_key] not in existing_query_keys]
                 update_data = [data for data in dict_list if data[query_key] in existing_query_keys]
+                logger.info(
+                    f"{collection_info} 查询到 {len(existing_query_keys)} 条记录 新数据: {len(new_data)} 条, 已存在数据: {len(update_data)} 条")
                 # 插入新数据
                 new_result = []
                 if new_data:
                     with self.rlock:
                         new_result = self.collection.insert_many(new_data)
-                    logger.info(
-                        f"{len(new_result.inserted_ids)} 条新数据成功保存到mongodb {collection_info}, 耗时: {time.perf_counter() - start_time:.6f} 秒")
+                    if self.log_enabled:
+                        logger.info(f"{len(new_result.inserted_ids)} 条新数据成功保存到mongodb {collection_info}, "
+                                    f"耗时: {time.perf_counter() - start_time:.6f} 秒")
                 # 更新已存在数据
                 if update_data:
                     for data in update_data:
@@ -403,8 +457,8 @@ class CollectionWrapper:
         except pymongo.errors.BulkWriteError as e:
             logger.error(f"Failed to save data: {str(e.details)}")
             raise
-        except Exception as e:
-            logger.error(f"保存数据失败: {e}")
+        # except Exception as e:
+        #     logger.error(f"保存数据失败: {e}")
 
     def md5_encrypt(self, text):
         text = str(text)
@@ -412,13 +466,17 @@ class CollectionWrapper:
         md5.update(text.encode('utf-8'))
         return md5.hexdigest()
 
-    def delete_documents(self, query=None, recyclable=False, drop_if_empty=False):
+    def delete_documents(self, query=None, skip=None, limit=None, recyclable=False, drop_if_empty=False):
         """
         删除满足条件的文档并根据需要将其移至回收站。
         :param query: 查询条件，字典格式
         :param recyclable: 是否将文档移至回收站，默认为False
         :param drop_if_empty: 是否在删除所有满足条件的文档后，如果集合为空则删除集合，默认为False
         :return: 删除的文档数量
+
+        Args:
+            limit:
+            skip:
         """
 
         if query is None:
@@ -428,8 +486,14 @@ class CollectionWrapper:
         try:
             # 查找要删除的文档
             with self.rlock:
-                documents_to_delete = list(self.collection.find(query))
-
+                if skip is not None and limit is not None:
+                    documents_to_delete = list(self.collection.find(query).skip(skip).limit(limit))
+                elif skip is not None:
+                    documents_to_delete = list(self.collection.find(query).skip(skip))
+                elif limit is not None:
+                    documents_to_delete = list(self.collection.find(query).limit(limit))
+                else:
+                    documents_to_delete = list(self.collection.find(query))
             # 检查是否有文档需要删除
             if not documents_to_delete:
                 logger.error("没有满足条件的文档需要删除。")

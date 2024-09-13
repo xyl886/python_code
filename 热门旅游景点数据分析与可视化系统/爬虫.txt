@@ -1,0 +1,38 @@
+爬虫库
+DrissionPage
+scrapy
+
+数据存储用的是MongoDB
+
+马蜂窝网站  https://www.mafengwo.cn/mdd/citylist/21536.html
+先获取这个页面下所有城市信息
+{
+                'id': id, # id
+                'pinyin': pinyin,  # 拼音
+                'name': name, # 名称
+                'nums': nums, # 多少人去过
+                'detail': detail, # 详细介绍
+                'top3': top3, # top3
+                'url': url,  # 链接
+            }
+
+然后访问每个城市的url，获取每个的城市景点,例如北京  https://www.mafengwo.cn/jd/10065/gonglve.html
+
+{
+                'name': name, # 景点名称
+                'url': url, # 链接
+                'city_id': city_id,#城市id
+            }
+
+然后访问每个景点，获取景点详情数据，以及景点点评，因为景点数量太多了，然后后面就筛选，只爬了点评数排名前10的景点点评
+字段有 review_num #点评数
+summary  简介
+电话
+用时参考
+交通
+门票
+开放时间
+景点位置
+热门优惠
+
+蜂蜂点评 爬取的字段有  昵称，等级 评分 评价内容 评价时间

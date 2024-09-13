@@ -4,7 +4,6 @@ Created by 18034 on 2024/4/27.
 """
 import pandas as pd
 import pymysql
-from loguru import logger
 from pymysql import cursors
 
 

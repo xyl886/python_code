@@ -43,6 +43,8 @@ def save_dict_list_to_excel(data_list, output_file, sheet_name='Sheet1', check_c
         # 过滤掉列表中的None元素
         filtered_data_list = [d for d in data_list if d is not None]
         df = pd.DataFrame(filtered_data_list)
+        # 把nan替换掉
+        df.fillna('', inplace=True)
         if check_columns:
             column_set = set(df.columns)
             for dictionary in data_list:
@@ -113,18 +115,21 @@ def save_df_to_excel(df, output_file, sheet_name, check_columns):
                     combined_data = pd.concat([existing_df, df], ignore_index=True)
                     combined_data.to_excel(writer, sheet_name=sheet_name, index=False, header=(not existing_df.empty))
                     logger.info(
-                        f"数据已追加保存到 {output_file} 的 {sheet_name} 表格, 耗时 {time.perf_counter() - start_time:.6f} 秒")
+                        f"{len(df)} 条数据已追加保存到 {output_file} 的 {sheet_name} 表格, "
+                        f"耗时 {time.perf_counter() - start_time:.6f} 秒")
             else:
                 # sheet 不存在，新建 sheet
                 with pd.ExcelWriter(output_file, engine='openpyxl', mode='a') as writer:
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
                     logger.info(
-                        f"新建sheet页 {sheet_name}, 数据已保存到 {output_file} 的 {sheet_name} 表格, 耗时 {time.perf_counter() - start_time:.6f} 秒")
+                        f"新建sheet页 {sheet_name}, {len(df)} 条数据已保存到 {output_file} 的 {sheet_name} 表格, "
+                        f"耗时 {time.perf_counter() - start_time:.6f} 秒")
         else:
             # 文件不存在，新建文件并新建 sheet
             with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
                 logger.info(
-                    f"新建文件{output_file}，新建sheet页 {sheet_name}， 数据已保存到 {sheet_name} 表格, 耗时 {time.perf_counter() - start_time:.6f} 秒")
+                    f"新建文件{output_file}，新建sheet页 {sheet_name}， {len(df)} 条数据已保存到 {sheet_name} 表格, "
+                    f"耗时 {time.perf_counter() - start_time:.6f} 秒")
     except Exception as e:
         logger.error(f"保存数据时发生错误: {str(e)}")
